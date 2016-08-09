@@ -1,0 +1,6 @@
+LIBRARY	"compression"
+EXPORTS
+Compress
+DecompressionProc
+Name
+Configure
