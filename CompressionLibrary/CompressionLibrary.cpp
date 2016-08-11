@@ -1,11 +1,11 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-// Test
+// Custom compression library example
 //
 // Version        : PELock v2.0
-// Language       : C / Assembly
-// Author         : Brad Miller (mudlord@mail.com)
-// Web page       : https://www.mudlord.info
+// Language       : C++
+// Author         : Bartosz Wójcik (support@pelock.com)
+// Web page       : https://www.pelock.com
 //
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -13,36 +13,6 @@
 
 // compression algorithm name (for logging purposes)
 const char szCompressionName[] = "CCX";
-#define BLZ_HEADER_SIZE (3 * 4)
-
-
-
-#if CHAR_BIT == 8
-#  define octet(v) ((unsigned char) (v))
-#else
-#  define octet(v) ((v) & 0x00FF)
-#endif
-
-static void
-write_be32(unsigned char *p, unsigned long val)
-{
-	p[0] = octet(val >> 24);
-	p[1] = octet(val >> 16);
-	p[2] = octet(val >> 8);
-	p[3] = octet(val);
-}
-
-/*
-* Read a 32-bit unsigned value in network order.
-*/
-static unsigned long
-read_be32(const unsigned char *p)
-{
-	return ((unsigned long)octet(p[0]) << 24)
-		| ((unsigned long)octet(p[1]) << 16)
-		| ((unsigned long)octet(p[2]) << 8)
-		| ((unsigned long)octet(p[3]));
-}
 
 //
 // DWORD __stdcall Compress(const PBYTE lpInput, DWORD dwInput, PBYTE lpOutput, PDWORD lpdwOutput, LPCOMPRESSION_PROGRESS lpCompressionProgress, const char *lpszConfig, DWORD Reserved)
@@ -61,8 +31,6 @@ read_be32(const unsigned char *p)
 // [out]
 // 0 for success, anything != 0 for an error
 //
-
-
 EXPORT DWORD __stdcall Compress(const PBYTE lpInput, DWORD dwInput, PBYTE lpOutput, PDWORD lpdwOutput, LPCOMPRESSION_PROGRESS lpCompressionProgress, const char *lpszConfig, DWORD Reserved)
 {
 	PBYTE lpIn = NULL, lpOut = NULL;
@@ -71,7 +39,7 @@ EXPORT DWORD __stdcall Compress(const PBYTE lpInput, DWORD dwInput, PBYTE lpOutp
 	//
 	// check input params (altrough it's almost impossible it will be invalid)
 	//
-	if ((lpInput == NULL) || (dwInput == 0) || (lpOutput == NULL))
+	if ( (lpInput == NULL) || (dwInput == 0) || (lpOutput == NULL) )
 	{
 		return COMPESSION_ERROR_PARAM;
 	}
@@ -117,6 +85,86 @@ EXPORT DWORD __stdcall Compress(const PBYTE lpInput, DWORD dwInput, PBYTE lpOutp
 	//
 	return COMPRESSION_OK;
 }
+
+//
+// DWORD __cdecl DecompressionProc(PDEPACK_INTERFACE lpDepackInterface, PVOID lpInputData, PVOID lpOutputData)
+//
+// decompression routine (raw code), this code will be binded to the main loader code
+// of a PELock, so you must follow some rules:
+//
+// * all registers (except EAX) MUST BE preserved (use pushad and popad), flags can be destroyed
+// * you must return decompressed size in EAX
+// * this routine is __cdecl, you SHOULD NOT fix the stack with ret 12
+// * you can use lpInputData as a temporary buffer
+//
+// [in]
+// lpDepackInterface - pointer to the DEPACK_INTERFACE structure, it gives access to the
+// WinApi functions, you can create very complex decompression procedures with it
+// lpInputData - compressed data
+// lpOutputData - where to put decompressed data
+//
+// [out]
+// size of decompressed data
+//
+#define MARK_END_OF_FUNCTION(funcname) void funcname ## _eof_marker() { }
+#define SIZEOF_FUNCTION(funcname) ((unsigned long)&funcname ## _eof_marker - (unsigned long)&funcname)
+__declspec(naked) DWORD DecompressionRoutine(PDEPACK_INTERFACE lpDepackInterface, PVOID lpInputData, PVOID lpOutputData)
+{
+	__asm
+	{
+		pushad							// save all registers
+
+		mov	ebx, dword ptr [esp + 36]	// lpDepackInterface (table with WinApi procedures)
+		mov	esi, dword ptr [esp + 40]	// lpInputData
+		mov	edi, dword ptr [esp + 44]	// lpOutputData
+
+		mov	eax, dword ptr[esi]			// 1st DWORD of an input data indicates size of compressed data (our own format)
+		add	esi,4
+		mov	dword ptr [esp + 28], eax	// return decompressed data size (it will be returned in EAX after return)
+
+		mov	ecx,eax						// decompression code (in our case it's simple memcpy routine)
+		shr	ecx,2
+		and	eax,3
+		rep	movsd
+		mov	ecx,eax
+		rep	movsb
+
+		popad							// restore all registers (EAX = decompressed data size)
+
+		retn							// return (retn = ret 0, our routine is __cdecl, DO NOT use ret 12!)
+
+		_emit 0xAA						// code marker, so we can calculate size of the decompression
+		_emit 0xFF						// routine manually
+		_emit 0xFF						//
+		_emit 0xAA						//
+	}
+}
+#pragma optimize ("gst",off)
+MARK_END_OF_FUNCTION(DecompressionRoutine)
+#pragma optimize ("gst",on)
+//
+// void __stdcall DecompressionProc(PVOID **lppDecompProc, DWORD *lpdwDecompProc, DWORD Reserved)
+//
+// returns pointer to the decompression routine & its size
+//
+// [in]
+// Reserved - it should be 0
+//
+// [out]
+// lppDecompProc - pointer to receive decompression routine address
+// lpdwDecompProc - DWORD to receive decompression routine size
+//
+// [notes]
+// this procedure is called only ONCE per session, so you can generate decompression code
+// dynamically (eg. using polymorphic engine), then at DLL_PROCESS_DETACH you can release
+// its memory
+//
+__declspec(dllexport) void __stdcall DecompressionProc(PVOID *lppDecompProc, PDWORD lpdwDecompProc, DWORD Reserved)
+{
+	*lppDecompProc = (PVOID)&DecompressionRoutine;
+	*lpdwDecompProc = SIZEOF_FUNCTION(DecompressionRoutine);
+}
+
 //
 // const char * __stdcall Name(DWORD Reserved)
 //
@@ -153,15 +201,15 @@ EXPORT void __stdcall Configure(HWND hWndParent, const char *lpszConfig, DWORD R
 //
 BOOL APIENTRY DllMain(HINSTANCE hModule, DWORD ul_reason_for_call, LPVOID lpReserved)
 {
-	switch (ul_reason_for_call)
+	switch(ul_reason_for_call)
 	{
-		// initialize (allocate memory buffers etc.)
+	// initialize (allocate memory buffers etc.)
 	case DLL_PROCESS_ATTACH:
 
 		DisableThreadLibraryCalls(hModule);
 		break;
 
-		// cleanup
+	// cleanup
 	case DLL_PROCESS_DETACH:
 
 		break;
